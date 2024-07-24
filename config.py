@@ -3,6 +3,7 @@ random_seed = 42
 # Input.
 filename_train = "../data/MassSpecGym_train.mgf"
 filename_val = "../data/MassSpecGym_val.mgf"
+out_dir = "../data/out/"
 
 # Spectrum preprocessing.
 min_mz = 50

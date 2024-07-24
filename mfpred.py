@@ -1,5 +1,6 @@
 import datetime
 import logging
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -106,16 +107,6 @@ setup_logging(None, "info")
 pl.seed_everything(seed=config.random_seed, workers=True)
 torch.set_float32_matmul_precision("medium")
 
-# Configure the model.
-model = model.MolecularFormulaPredictor(
-    config.d_model,
-    config.nhead,
-    config.dim_feedforward,
-    config.n_layers,
-    config.dropout,
-    config.vocab,
-    config.lr,
-)
 # Create the training and validation data loaders.
 # FIXME: DepthCharge fix needed for SpectrumDataset to be able to shuffle.
 #  https://github.com/wfondrie/depthcharge/issues/62
@@ -126,6 +117,20 @@ val_dataloader = data.make_dataloader(
     config.filename_val, config.batch_size, shuffle=False
 )
 
+os.makedirs(config.out_dir, exist_ok=True)
+
+# Configure the model.
+predictor = model.MolecularFormulaPredictor(
+    config.d_model,
+    config.nhead,
+    config.dim_feedforward,
+    config.n_layers,
+    config.dropout,
+    config.vocab,
+    config.max_atom_cardinality,
+    config.tau,
+    config.lr,
+)
 # Train the model.
 trainer = pl.Trainer(
     accelerator="auto",
@@ -136,11 +141,12 @@ trainer = pl.Trainer(
             mode="min",
         ),
         pl.callbacks.ModelCheckpoint(
+            config.out_dir,
+            filename=TOOL_NAME,
             monitor="val_loss",
             mode="min",
         ),
     ],
-    deterministic=True,
     devices="auto",
     enable_checkpointing=True,
     enable_progress_bar=True,
@@ -151,4 +157,4 @@ trainer = pl.Trainer(
         find_unused_parameters=False, static_graph=True
     ),
 )
-trainer.fit(model, train_dataloader, val_dataloader)
+trainer.fit(predictor, train_dataloader, val_dataloader)
