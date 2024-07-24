@@ -37,10 +37,13 @@ def split_formula(formula: str, vocab: Sequence[str]) -> Dict[str, int]:
     """
     atom_counts = {atom: 0 for atom in vocab}
     for atom, count in re.findall(token_pattern, formula):
-        if atom in vocab:
-            atom_counts[atom] = int(count) if count else 1
+        count = int(count) if count else 1
+        if atom not in vocab:
+            raise ValueError(f"Unknown atom {atom}")
+        elif count >= config.max_atom_cardinality:
+            raise ValueError(f"Excessive cardinality {count} for atom {atom}")
         else:
-            raise ValueError(f"Unknown atom: {atom}")
+            atom_counts[atom] = count
 
     return atom_counts
 

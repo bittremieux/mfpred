@@ -89,6 +89,10 @@ class MolecularFormulaPredictor(pl.LightningModule):
         The dropout probability for all layers.
     vocab : Sequence[str]
         The vocabulary of atoms to consider.
+    max_atom_cardinality : int
+        The maximum atom cardinality to consider.
+    tau : float, optional
+        The temperature parameter for the Gumbel softmax.
     lr : float
         The learning rate for training used by the Adam optimizer.
 
@@ -109,17 +113,25 @@ class MolecularFormulaPredictor(pl.LightningModule):
         n_layers: int,
         dropout: float,
         vocab: Sequence[str],
+        max_atom_cardinality: int,
+        tau: float,
         lr: float,
     ):
         super().__init__()
+        self.save_hyperparameters()
 
         self.vocab = vocab
+        self.vocab_size = len(vocab)
+        self.max_atom_cardinality = max_atom_cardinality
+        self.tau = tau
         self.lr = lr
 
         self.spec_encoder = SpectrumTransformerEncoder(
             d_model, n_head, d_feedforward, n_layers, dropout
         )
-        self.fc = nn.Linear(d_model, len(self.vocab))
+        self.fc = nn.Linear(
+            d_model, self.vocab_size * self.max_atom_cardinality
+        )
 
     def forward(
         self,
@@ -163,7 +175,9 @@ class MolecularFormulaPredictor(pl.LightningModule):
         # embeddings for the spectrum itself.
         emb = emb[:, 0, :]
         # Predict the atom counts from the spectrum embeddings.
-        logits = self.fc(emb).to(torch.float16)
+        logits = self.fc(emb).view(
+            -1, self.vocab_size, self.max_atom_cardinality
+        )
         return logits
 
     def step(self, batch: Dict) -> torch.Tensor:
@@ -184,10 +198,9 @@ class MolecularFormulaPredictor(pl.LightningModule):
             The loss for the batch.
         """
         # Get the target atom counts.
-        # FIXME: Avoid converting to float.
         targets = (
             torch.stack([batch[atom] for atom in self.vocab], dim=1)
-            .to(torch.float16)
+            .to(torch.long)    # Ensure targets are long for cross-entropy.
             .to(self.spec_encoder.device)
         )
         # Predict the atom counts.
@@ -196,8 +209,19 @@ class MolecularFormulaPredictor(pl.LightningModule):
             batch["intensity_array"],
             precursor_mz=batch["precursor_mz"],
         )
+
+        # Apply the Gumbel softmax.
+        logits = F.gumbel_softmax(logits, tau=self.tau, hard=True)
+
         # Compute the loss.
-        return F.mse_loss(logits, targets)
+        # Logits are shape (batch_size, vocab_size, max_atom_cardinality).
+        # Targets are shape (batch_size, vocab_size).
+        loss = torch.zeros(1, device=self.spec_encoder.device)
+        for i in range(self.vocab_size):
+            loss += F.cross_entropy(logits[:, i, :], targets[:, i])
+        loss /= self.vocab_size  # Normalize by vocab_size.
+
+        return loss
 
     def training_step(
         self,
