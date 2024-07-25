@@ -48,6 +48,12 @@ def split_formula(formula: str, vocab: Sequence[str]) -> Dict[str, int]:
     return atom_counts
 
 
+def _is_protonated(adduct: str) -> bool:
+    if adduct != "[M+H]+":
+        raise ValueError(f"Unsupported adduct {adduct}")
+    return True
+
+
 def make_dataloader(
     filename: str, batch_size: int, shuffle: bool = True
 ) -> torch.utils.data.DataLoader:
@@ -83,6 +89,12 @@ def make_dataloader(
                     "adduct",
                     lambda x: x["params"]["adduct"].strip(),
                     pa.string(),
+                ),
+                # FIXME: Temporary removal of non-protonated adducts.
+                dc.data.CustomField(
+                    "is_protonated",
+                    lambda x: _is_protonated(x["params"]["adduct"].strip()),
+                    pa.bool_(),
                 ),
                 *[
                     dc.data.CustomField(
