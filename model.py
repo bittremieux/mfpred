@@ -20,6 +20,7 @@ class SpectrumTransformerEncoder(dc.transformers.SpectrumTransformerEncoder):
         super().__init__(d_model, n_head, d_feedforward, n_layers, dropout)
         self.precursor_mz_encoder = dc.encoders.FloatEncoder(d_model)
         # TODO: Add aduct encoder.
+        self.fc_combined = nn.Linear(2 * d_model, d_model)
 
     def global_token_hook(
         self,
@@ -59,7 +60,9 @@ class SpectrumTransformerEncoder(dc.transformers.SpectrumTransformerEncoder):
         )
         # TODO: Add adduct embedding.
         adduct_emb = torch.zeros_like(precursor_mz_emb)
-        return (precursor_mz_emb + adduct_emb).squeeze()
+        # Combine the different precursor-level embeddings.
+        combined_emb = torch.cat((precursor_mz_emb, adduct_emb), dim=-1)
+        return self.fc_combined(combined_emb).squeeze()
 
 
 class MolecularFormulaPredictor(pl.LightningModule):
