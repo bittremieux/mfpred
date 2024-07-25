@@ -183,17 +183,17 @@ class MolecularFormulaPredictor(pl.LightningModule):
         )
         return logits
 
-    def step(self, batch: Dict) -> torch.Tensor:
+    def _compute_loss(self, batch: Dict) -> torch.Tensor:
         """
-        Compute the loss for a batch of training data.
+        Compute the loss for a batch of data.
 
         Parameters
         ----------
         batch : Dict
             A batch of training data from a `DataLoader` operating on a
             `SpectrumDataset`. The dictionary should contain at least
-            the keys "mz_array", "intensity_array", "precursor_mz", and
-            "formula".
+            the keys "mz_array", "intensity_array", "precursor_mz",
+            "adduct", and "formula".
 
         Returns
         -------
@@ -206,16 +206,17 @@ class MolecularFormulaPredictor(pl.LightningModule):
             .to(torch.long)    # Ensure targets are long for cross-entropy.
             .to(self.spec_encoder.device)
         )
+
         # Predict the atom counts.
         logits = self(
             batch["mz_array"],
             batch["intensity_array"],
             precursor_mz=batch["precursor_mz"],
+            adduct=batch["adduct"],
         )
 
         # Apply the Gumbel softmax.
         gumbel_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False)
-
         # Convert to log probabilities to use NLL loss.
         log_probs = torch.log(gumbel_probs + 1e-10)
         # Gumbel probabilities are shape
@@ -223,11 +224,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         # Targets are shape (batch_size, vocab_size).
         return F.nll_loss(log_probs.permute(0, 2, 1), targets)
 
-    def training_step(
-        self,
-        batch,
-        batch_idx: int,
-    ):
+    def training_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
         """
         Compute the loss for a batch of training data.
 
@@ -236,8 +233,8 @@ class MolecularFormulaPredictor(pl.LightningModule):
         batch : Dict
             A batch of training data from a `DataLoader` operating on a
             `SpectrumDataset`. The dictionary should contain at least
-            the keys "mz_array", "intensity_array", "precursor_mz", and
-            "formula".
+            the keys "mz_array", "intensity_array", "precursor_mz",
+            "adduct", and "formula".
         batch_idx : int
             The index of the batch.
 
@@ -246,7 +243,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         loss : torch.Tensor
             The loss for the batch.
         """
-        loss = self.step(batch)
+        loss = self._compute_loss(batch)
         self.log(
             "train_loss",
             loss,
@@ -258,21 +255,17 @@ class MolecularFormulaPredictor(pl.LightningModule):
         )
         return loss
 
-    def validation_step(
-        self,
-        batch,
-        batch_idx: int,
-    ):
+    def validation_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
         """
         Compute the loss for a batch of validation data.
 
         Parameters
         ----------
         batch : Dict
-            A batch of validation data from a `DataLoader` operating on
-             a`SpectrumDataset`. The dictionary should contain at least
-            the keys "mz_array", "intensity_array", "precursor_mz", and
-            "formula".
+            A batch of training data from a `DataLoader` operating on a
+            `SpectrumDataset`. The dictionary should contain at least
+            the keys "mz_array", "intensity_array", "precursor_mz",
+            "adduct", and "formula".
         batch_idx : int
             The index of the batch.
 
@@ -281,7 +274,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         loss : torch.Tensor
             The loss for the batch.
         """
-        loss = self.step(batch)
+        loss = self._compute_loss(batch)
         self.log(
             "val_loss",
             loss,
@@ -292,6 +285,39 @@ class MolecularFormulaPredictor(pl.LightningModule):
             batch_size=batch["mz_array"].shape[0],
         )
         return loss
+
+    def predict_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
+        """
+        Make predictions for a batch of spectra.
+
+        Parameters
+        ----------
+        batch : Dict
+            A batch of spectra from a `DataLoader` operating on a
+            `SpectrumDataset`. The dictionary should contain at least
+            the keys "mz_array", "intensity_array", "precursor_mz",
+            "adduct", and "formula".
+        batch_idx : int
+            The index of the batch.
+
+        Returns
+        -------
+        torch.Tensor
+            The predicted atom counts for each spectrum in the batch.
+        """
+        logits = self(
+            batch["mz_array"],
+            batch["intensity_array"],
+            precursor_mz=batch["precursor_mz"],
+            adduct=batch["adduct"],
+        )
+        predictions = torch.argmax(logits, dim=-1)
+        return predictions
+        # Alternatively, the Gumbel softmax (with hard=False) could be
+        # used to understand the uncertainty in the predictions.
+        # gumbel_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False)
+        # predictions = torch.argmax(gumbel_probs, dim=-1)
+        # return predictions, gumbel_probs
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """
