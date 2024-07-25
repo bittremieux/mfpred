@@ -214,17 +214,14 @@ class MolecularFormulaPredictor(pl.LightningModule):
         )
 
         # Apply the Gumbel softmax.
-        logits = F.gumbel_softmax(logits, tau=self.tau, hard=True)
+        gumbel_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False)
 
-        # Compute the loss.
-        # Logits are shape (batch_size, vocab_size, max_atom_cardinality).
+        # Convert to log probabilities to use NLL loss.
+        log_probs = torch.log(gumbel_probs + 1e-10)
+        # Gumbel probabilities are shape
+        # (batch_size, vocab_size, max_atom_cardinality).
         # Targets are shape (batch_size, vocab_size).
-        loss = torch.zeros(1, device=self.spec_encoder.device)
-        for i in range(self.vocab_size):
-            loss += F.cross_entropy(logits[:, i, :], targets[:, i])
-        loss /= self.vocab_size  # Normalize by vocab_size.
-
-        return loss
+        return F.nll_loss(log_probs.permute(0, 2, 1), targets)
 
     def training_step(
         self,
