@@ -307,5 +307,5 @@ class MolecularFormulaPredictor(pl.LightningModule):
         torch.optim.Optimizer
             The optimizer.
         """
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
         return optimizer
