@@ -1,6 +1,6 @@
 import functools
 import re
-from typing import Dict, Sequence
+from typing import Dict
 
 import depthcharge as dc
 import pyarrow as pa
@@ -14,7 +14,7 @@ token_pattern = re.compile(r"([A-Z][a-z]*)(\d*)")
 
 
 @functools.lru_cache(maxsize=None)
-def split_formula(formula: str, vocab: Sequence[str]) -> Dict[str, int]:
+def split_formula(formula: str) -> Dict[str, int]:
     """
     Split a molecular formula into atom counts.
 
@@ -22,8 +22,6 @@ def split_formula(formula: str, vocab: Sequence[str]) -> Dict[str, int]:
     ----------
     formula : str
         The molecular formula.
-    vocab : Sequence[str]
-        The vocabulary of atoms to consider.
 
     Returns
     -------
@@ -35,12 +33,12 @@ def split_formula(formula: str, vocab: Sequence[str]) -> Dict[str, int]:
     ValueError
         If an unknown atom is encountered.
     """
-    atom_counts = {atom: 0 for atom in vocab}
+    atom_counts = {atom: 0 for atom in config.vocab.keys()}
     for atom, count in re.findall(token_pattern, formula):
         count = int(count) if count else 1
-        if atom not in vocab:
+        if atom not in config.vocab:
             raise ValueError(f"Unknown atom {atom}")
-        elif count >= config.max_atom_cardinality:
+        elif count >= config.vocab[atom]:
             raise ValueError(f"Excessive cardinality {count} for atom {atom}")
         else:
             atom_counts[atom] = count
@@ -101,7 +99,6 @@ def make_dataloader(
                         atom,
                         lambda x, atom=atom: split_formula(
                             x["params"]["precursor_formula"].strip(),
-                            config.vocab,
                         )[atom],
                         pa.int8(),
                     )

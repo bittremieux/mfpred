@@ -14,7 +14,14 @@ max_num_peaks = 150
 scaling = "root"
 
 # Supported atoms.
-vocab = "CHNOPS"
+vocab = dict(
+    C=60,
+    H=120,
+    N=20,
+    O=30,
+    P=5,
+    S=10,
+)
 
 # Model hyperparameters.
 d_model = 256
@@ -22,7 +29,6 @@ nhead = 8
 dim_feedforward = 2048
 n_layers = 5
 dropout = 0.1
-max_atom_cardinality = 100
 tau = 1.0
 
 # Training settings.

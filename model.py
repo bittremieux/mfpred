@@ -1,4 +1,4 @@
-from typing import Dict, Sequence
+from typing import Dict, List
 
 import depthcharge as dc
 import pytorch_lightning as pl
@@ -90,10 +90,9 @@ class MolecularFormulaPredictor(pl.LightningModule):
         The number of transformer layers.
     dropout : float
         The dropout probability for all layers.
-    vocab : Sequence[str]
-        The vocabulary of atoms to consider.
-    max_atom_cardinality : int
-        The maximum atom cardinality to consider.
+    vocab : Dict[str, int]
+        The vocabulary of atoms and their maximum cardinalities to
+        consider.
     tau : float, optional
         The temperature parameter for the Gumbel softmax.
     lr : float
@@ -115,8 +114,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         d_feedforward: int,
         n_layers: int,
         dropout: float,
-        vocab: Sequence[str],
-        max_atom_cardinality: int,
+        vocab: Dict[str, int],
         tau: float,
         lr: float,
     ):
@@ -125,15 +123,17 @@ class MolecularFormulaPredictor(pl.LightningModule):
 
         self.vocab = vocab
         self.vocab_size = len(vocab)
-        self.max_atom_cardinality = max_atom_cardinality
         self.tau = tau
         self.lr = lr
 
         self.spec_encoder = SpectrumTransformerEncoder(
             d_model, n_head, d_feedforward, n_layers, dropout
         )
-        self.fc = nn.Linear(
-            d_model, self.vocab_size * self.max_atom_cardinality
+        self.outputs = nn.ModuleList(
+            [
+                nn.Linear(d_model, cardinality)
+                for cardinality in vocab.values()
+            ]
         )
 
     def forward(
@@ -143,7 +143,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         *args: torch.Tensor,
         mask: torch.Tensor | None = None,
         **kwargs: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> List[torch.Tensor]:
         """
         Predict the atom counts from an MS/MS spectrum.
 
@@ -166,8 +166,9 @@ class MolecularFormulaPredictor(pl.LightningModule):
 
         Returns
         -------
-        logits : torch.Tensor of shape (n_spectra, n_atoms)
-            The predicted atom counts for each spectrum in the batch.
+        logits : List[torch.Tensor]
+            The predicted counts for each atom in the vocabulary as
+            logits, for each spectrum in the batch.
         """
         # Encode the spectrum.
         emb, _ = self.spec_encoder(
@@ -178,9 +179,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         # embeddings for the spectrum itself.
         emb = emb[:, 0, :]
         # Predict the atom counts from the spectrum embeddings.
-        logits = self.fc(emb).view(
-            -1, self.vocab_size, self.max_atom_cardinality
-        )
+        logits = [output(emb) for output in self.outputs]
         return logits
 
     def _compute_loss(self, batch: Dict) -> torch.Tensor:
@@ -202,9 +201,9 @@ class MolecularFormulaPredictor(pl.LightningModule):
         """
         # Get the target atom counts.
         targets = (
-            torch.stack([batch[atom] for atom in self.vocab], dim=1)
-            .to(torch.long)    # Ensure targets are long for cross-entropy.
-            .to(self.spec_encoder.device)
+            torch.stack([batch[atom] for atom in self.vocab], dim=0)
+            .to(torch.long)
+            .to(self.device)
         )
 
         # Predict the atom counts.
@@ -215,14 +214,18 @@ class MolecularFormulaPredictor(pl.LightningModule):
             adduct=batch["adduct"],
         )
 
-        # Apply the Gumbel softmax.
-        gumbel_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False)
-        # Convert to log probabilities to use NLL loss.
-        log_probs = torch.log(gumbel_probs + 1e-10)
-        # Gumbel probabilities are shape
-        # (batch_size, vocab_size, max_atom_cardinality).
-        # Targets are shape (batch_size, vocab_size).
-        return F.nll_loss(log_probs.permute(0, 2, 1), targets)
+        loss = torch.zeros(1, device=self.device)
+        for output, target in zip(logits, targets):
+            # Apply the Gumbel softmax.
+            gumbel_probs = F.gumbel_softmax(output, tau=self.tau, hard=False)
+            # Convert to log probabilities to use NLL loss.
+            log_probs = torch.log(gumbel_probs + 1e-10)
+            # Gumbel log probabilities are shape
+            # (batch_size, max_atom_cardinality).
+            # Targets are shape (batch_size,).
+            loss += F.nll_loss(log_probs, target, reduction="mean")
+        loss /= self.vocab_size
+        return loss
 
     def training_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
         """
@@ -302,7 +305,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
 
         Returns
         -------
-        torch.Tensor
+        torch.Tensor of shape (batch_size, vocab_size)
             The predicted atom counts for each spectrum in the batch.
         """
         logits = self(
@@ -311,13 +314,12 @@ class MolecularFormulaPredictor(pl.LightningModule):
             precursor_mz=batch["precursor_mz"],
             adduct=batch["adduct"],
         )
-        predictions = torch.argmax(logits, dim=-1)
-        return predictions
         # Alternatively, the Gumbel softmax (with hard=False) could be
         # used to understand the uncertainty in the predictions.
-        # gumbel_probs = F.gumbel_softmax(logits, tau=self.tau, hard=False)
-        # predictions = torch.argmax(gumbel_probs, dim=-1)
-        # return predictions, gumbel_probs
+        predictions = torch.stack(
+            [torch.argmax(output, dim=1) for output in logits], dim=1
+        )
+        return predictions
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """
