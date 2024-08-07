@@ -29,7 +29,6 @@ nhead = 8
 dim_feedforward = 2048
 n_layers = 5
 dropout = 0.1
-tau = 1.0
 
 # Training settings.
 lr = 1e-3

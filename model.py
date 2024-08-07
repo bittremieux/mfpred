@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict
 
 import depthcharge as dc
 import pytorch_lightning as pl
@@ -72,8 +72,6 @@ class MolecularFormulaPredictor(pl.LightningModule):
     The model consists of a transformed-based spectrum encoder, based on
     Yilmaz et al. (2022) [1]_, followed by a linear layer to predict
     counts of individual atoms constituting the molecular formula.
-    Atom counts are predicted as an ordinal regression task using the
-    Gumbel softmax.
 
     Parameters
     ----------
@@ -93,11 +91,6 @@ class MolecularFormulaPredictor(pl.LightningModule):
     vocab : Dict[str, int]
         The vocabulary of atoms and their maximum cardinalities to
         consider.
-    tau : float, optional
-        The temperature parameter for the Gumbel softmax.
-    reg_weight : float, optional
-        The weight for the adjacent class probabilities regularization
-        term in the loss function.
     lr : float
         The learning rate for training used by the Adam optimizer.
 
@@ -118,8 +111,6 @@ class MolecularFormulaPredictor(pl.LightningModule):
         n_layers: int,
         dropout: float,
         vocab: Dict[str, int],
-        tau: float,
-        reg_weight: float,
         lr: float,
     ):
         super().__init__()
@@ -127,19 +118,12 @@ class MolecularFormulaPredictor(pl.LightningModule):
 
         self.vocab = vocab
         self.vocab_size = len(vocab)
-        self.tau = tau
-        self.reg_weight = reg_weight
         self.lr = lr
 
         self.spec_encoder = SpectrumTransformerEncoder(
             d_model, n_head, d_feedforward, n_layers, dropout
         )
-        self.outputs = nn.ModuleList(
-            [
-                nn.Linear(d_model, cardinality)
-                for cardinality in vocab.values()
-            ]
-        )
+        self.fc = nn.Linear(d_model, self.vocab_size)
 
     def forward(
         self,
@@ -148,7 +132,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         *args: torch.Tensor,
         mask: torch.Tensor | None = None,
         **kwargs: dict,
-    ) -> List[torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Predict the atom counts from an MS/MS spectrum.
 
@@ -171,9 +155,8 @@ class MolecularFormulaPredictor(pl.LightningModule):
 
         Returns
         -------
-        logits : List[torch.Tensor]
-            The predicted counts for each atom in the vocabulary as
-            logits, for each spectrum in the batch.
+        output : torch.Tensor of shape (n_spectra, vocab_size)
+            The predicted atom counts for each spectrum in the batch.
         """
         # Encode the spectrum.
         emb, _ = self.spec_encoder(
@@ -184,8 +167,8 @@ class MolecularFormulaPredictor(pl.LightningModule):
         # embeddings for the spectrum itself.
         emb = emb[:, 0, :]
         # Predict the atom counts from the spectrum embeddings.
-        logits = [output(emb) for output in self.outputs]
-        return logits
+        output = self.fc(emb).to(torch.bfloat16)
+        return output
 
     def _compute_loss(self, batch: Dict) -> torch.Tensor:
         """
@@ -206,13 +189,13 @@ class MolecularFormulaPredictor(pl.LightningModule):
         """
         # Get the target atom counts.
         targets = (
-            torch.stack([batch[atom] for atom in self.vocab], dim=0)
-            .to(torch.float)
+            torch.stack([batch[atom] for atom in self.vocab], dim=1)
+            .to(torch.bfloat16)
             .to(self.device)
         )
 
         # Predict the atom counts.
-        logits = self(
+        outputs = self(
             batch["mz_array"],
             batch["intensity_array"],
             precursor_mz=batch["precursor_mz"],
@@ -220,33 +203,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         )
 
         # Compute the loss.
-        mse_loss = torch.zeros(1, device=self.device)
-        diff_penalty = torch.zeros(1, device=self.device)
-
-        for output, target in zip(logits, targets):
-            # Apply the Gumbel softmax.
-            gumbel_probs = F.gumbel_softmax(output, tau=self.tau, hard=False)
-            # Convert the probabilities into a weighted sum, which
-            # represents the expected value of the atomic counts.
-            predictions = gumbel_probs @ torch.arange(
-                gumbel_probs.size(1), device=self.device, dtype=torch.bfloat16
-            )
-            # Compute the mean squared error, normalized by the maximum
-            # cardinality of the atom.
-            mse_loss += torch.sum(
-                ((predictions - target)) ** 2
-            )
-            # Penalize large differences between adjacent probabilities.
-            diff_penalty += torch.sum(
-                (gumbel_probs[:, 1:] - gumbel_probs[:, :-1]) ** 2
-            )
-        # Normalize the losses by the batch size.
-        batch_size = batch["mz_array"].shape[0]
-        mse_loss /= batch_size
-        diff_penalty /= batch_size
-        # Combine the MSE loss and the regularization penalty.
-        loss = mse_loss + self.reg_weight * diff_penalty
-        return loss
+        return F.mse_loss(outputs, targets)
 
     def training_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
         """
@@ -329,18 +286,14 @@ class MolecularFormulaPredictor(pl.LightningModule):
         torch.Tensor of shape (batch_size, vocab_size)
             The predicted atom counts for each spectrum in the batch.
         """
-        logits = self(
+        outputs = self(
             batch["mz_array"],
             batch["intensity_array"],
             precursor_mz=batch["precursor_mz"],
             adduct=batch["adduct"],
         )
-        # Alternatively, the Gumbel softmax (with hard=False) could be
-        # used to understand the uncertainty in the predictions.
-        predictions = torch.stack(
-            [torch.argmax(output, dim=1) for output in logits], dim=1
-        )
-        return predictions
+        outputs = torch.round(outputs).to(torch.int16)
+        return outputs
 
     def configure_optimizers(self) -> torch.optim.Optimizer:
         """
