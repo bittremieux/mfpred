@@ -127,8 +127,8 @@ predictor = model.MolecularFormulaPredictor(
     config.n_layers,
     config.dropout,
     config.vocab,
-    config.max_atom_cardinality,
     config.tau,
+    config.reg_weight,
     config.lr,
 )
 # Train the model.

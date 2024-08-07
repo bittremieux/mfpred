@@ -95,6 +95,9 @@ class MolecularFormulaPredictor(pl.LightningModule):
         consider.
     tau : float, optional
         The temperature parameter for the Gumbel softmax.
+    reg_weight : float, optional
+        The weight for the adjacent class probabilities regularization
+        term in the loss function.
     lr : float
         The learning rate for training used by the Adam optimizer.
 
@@ -116,6 +119,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         dropout: float,
         vocab: Dict[str, int],
         tau: float,
+        reg_weight: float,
         lr: float,
     ):
         super().__init__()
@@ -124,6 +128,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         self.vocab = vocab
         self.vocab_size = len(vocab)
         self.tau = tau
+        self.reg_weight = reg_weight
         self.lr = lr
 
         self.spec_encoder = SpectrumTransformerEncoder(
@@ -202,7 +207,7 @@ class MolecularFormulaPredictor(pl.LightningModule):
         # Get the target atom counts.
         targets = (
             torch.stack([batch[atom] for atom in self.vocab], dim=0)
-            .to(torch.long)
+            .to(torch.float)
             .to(self.device)
         )
 
@@ -214,17 +219,33 @@ class MolecularFormulaPredictor(pl.LightningModule):
             adduct=batch["adduct"],
         )
 
-        loss = torch.zeros(1, device=self.device)
+        # Compute the loss.
+        mse_loss = torch.zeros(1, device=self.device)
+        diff_penalty = torch.zeros(1, device=self.device)
+
         for output, target in zip(logits, targets):
             # Apply the Gumbel softmax.
             gumbel_probs = F.gumbel_softmax(output, tau=self.tau, hard=False)
-            # Convert to log probabilities to use NLL loss.
-            log_probs = torch.log(gumbel_probs + 1e-10)
-            # Gumbel log probabilities are shape
-            # (batch_size, max_atom_cardinality).
-            # Targets are shape (batch_size,).
-            loss += F.nll_loss(log_probs, target, reduction="mean")
-        loss /= self.vocab_size
+            # Convert the probabilities into a weighted sum, which
+            # represents the expected value of the atomic counts.
+            predictions = gumbel_probs @ torch.arange(
+                gumbel_probs.size(1), device=self.device, dtype=torch.bfloat16
+            )
+            # Compute the mean squared error, normalized by the maximum
+            # cardinality of the atom.
+            mse_loss += torch.sum(
+                ((predictions - target)) ** 2
+            )
+            # Penalize large differences between adjacent probabilities.
+            diff_penalty += torch.sum(
+                (gumbel_probs[:, 1:] - gumbel_probs[:, :-1]) ** 2
+            )
+        # Normalize the losses by the batch size.
+        batch_size = batch["mz_array"].shape[0]
+        mse_loss /= batch_size
+        diff_penalty /= batch_size
+        # Combine the MSE loss and the regularization penalty.
+        loss = mse_loss + self.reg_weight * diff_penalty
         return loss
 
     def training_step(self, batch: Dict, batch_idx: int) -> torch.Tensor:
